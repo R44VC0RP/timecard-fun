@@ -1,38 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/app/db';
 import { clockInRecords, clockOutRecords } from '@/app/db/schema';
-import { eq } from 'drizzle-orm';
-import { v4 as uuidv4 } from 'uuid';
+import { eq, and } from 'drizzle-orm';
+import { getServerSession } from 'next-auth';
+import { options } from '../auth/[...nextauth]/options';
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await getServerSession(options);
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const body = await request.json();
-    const { action, userId, timestamp } = body;
+    const { action, userId, timestamp, shiftId } = body;
     
-    // Convert incoming timezone timestamp to UTC
-    const utcTimestamp = new Date(timestamp);
+    // Verify the user is operating on their own data
+    if (userId !== session.user.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
     if (action === 'clockIn') {
-      // Generate a new shift ID
-      const shiftId = uuidv4();
-      
-      // Create clock in record
-      await db.insert(clockInRecords).values({
+      const result = await db.insert(clockInRecords).values({
         userId,
-        shiftId,
-        timestamp: utcTimestamp,
-      });
+        shiftId: crypto.randomUUID(),
+        timestamp: new Date(timestamp),
+      }).returning();
 
-      return NextResponse.json({ success: true, shiftId });
-
+      return NextResponse.json({ shiftId: result[0].shiftId });
     } else if (action === 'clockOut') {
-      const { shiftId } = body;
-      
-      // Create clock out record
       await db.insert(clockOutRecords).values({
         userId,
         shiftId,
-        timestamp: utcTimestamp,
+        timestamp: new Date(timestamp),
       });
 
       return NextResponse.json({ success: true });
@@ -40,61 +40,66 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   } catch (error) {
-    console.error('Error processing timecard action:', error);
+    console.error('Error in timecard API:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
 export async function GET(request: NextRequest) {
   try {
-    const searchParams = request.nextUrl.searchParams;
+    const session = await getServerSession(options);
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { searchParams } = new URL(request.url);
     const userId = searchParams.get('userId');
     const action = searchParams.get('action');
 
     if (!userId) {
-      return NextResponse.json({ error: 'userId is required' }, { status: 400 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Verify the user is requesting their own data
+    if (userId !== session.user.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     if (action === 'status') {
-      // Find the most recent clock in/out records for the user
+      // Get the last clock-in record for the user
       const lastClockIn = await db.query.clockInRecords.findFirst({
         where: eq(clockInRecords.userId, userId),
-        orderBy: (records, { desc }) => [desc(records.timestamp)],
+        orderBy: (clockInRecords, { desc }) => [desc(clockInRecords.timestamp)],
       });
 
-      const lastClockOut = await db.query.clockOutRecords.findFirst({
-        where: eq(clockOutRecords.userId, userId),
-        orderBy: (records, { desc }) => [desc(records.timestamp)],
-      });
+      if (!lastClockIn) {
+        return NextResponse.json({ isClocked: false });
+      }
 
-      // Determine if user is clocked in
-      const isClocked = lastClockIn && (!lastClockOut || new Date(lastClockIn.timestamp) > new Date(lastClockOut.timestamp));
+      // Check if there's a matching clock-out record
+      const matchingClockOut = await db.query.clockOutRecords.findFirst({
+        where: and(
+          eq(clockOutRecords.userId, userId),
+          eq(clockOutRecords.shiftId, lastClockIn.shiftId)
+        ),
+      });
 
       return NextResponse.json({
-        isClocked,
-        lastClockIn: isClocked ? lastClockIn : null,
+        isClocked: !matchingClockOut,
+        lastClockIn: !matchingClockOut ? lastClockIn : null,
       });
-
     } else if (action === 'shifts') {
-      // Get all shifts for the user
-      const clockIns = await db.query.clockInRecords.findMany({
-        where: eq(clockInRecords.userId, userId),
-      });
+      const clockIns = await db.select().from(clockInRecords).where(eq(clockInRecords.userId, userId));
+      const clockOuts = await db.select().from(clockOutRecords).where(eq(clockOutRecords.userId, userId));
 
-      const clockOuts = await db.query.clockOutRecords.findMany({
-        where: eq(clockOutRecords.userId, userId),
-      });
-
-      // Match clock ins with clock outs
       const shifts = clockIns.map(clockIn => {
         const clockOut = clockOuts.find(out => out.shiftId === clockIn.shiftId);
         return {
           shiftId: clockIn.shiftId,
           clockIn: clockIn.timestamp,
           clockOut: clockOut?.timestamp || null,
-          duration: clockOut 
-            ? (new Date(clockOut.timestamp).getTime() - new Date(clockIn.timestamp).getTime()) / 1000
-            : null
+          duration: clockOut ? Math.floor((clockOut.timestamp.getTime() - clockIn.timestamp.getTime()) / 1000) : null,
+          projectId: clockIn.projectId,
         };
       });
 
@@ -103,7 +108,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   } catch (error) {
-    console.error('Error fetching timecard data:', error);
+    console.error('Error in timecard API:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 } 

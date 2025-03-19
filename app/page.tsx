@@ -1,10 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useSession, signOut } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import { Project } from "./db/schema";
-
-// Mock user ID - in a real app, this would come from authentication
-const MOCK_USER_ID = "user123";
 
 type TimeEntry = {
   id: string;
@@ -26,6 +25,8 @@ type Shift = {
 };
 
 export default function Home() {
+  const { data: session, status } = useSession();
+  const router = useRouter();
   const [time, setTime] = useState(new Date());
   const [clockedIn, setClockedIn] = useState(false);
   const [timeElapsed, setTimeElapsed] = useState(0);
@@ -39,7 +40,13 @@ export default function Home() {
   const [newProject, setNewProject] = useState({ name: '', link: '' });
   const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
 
-  // Check initial clock-in status
+  // Redirect if not authenticated
+  useEffect(() => {
+    if (status === "unauthenticated") {
+      router.replace("/auth/signin");
+    }
+  }, [status, router]);
+
   useEffect(() => {
     checkClockStatus();
     fetchShifts();
@@ -59,8 +66,10 @@ export default function Home() {
   }, [clockedIn, clockInTime]);
 
   const checkClockStatus = async () => {
+    if (!session?.user?.id) return;
+    
     try {
-      const response = await fetch(`/api/timecard?userId=${MOCK_USER_ID}&action=status`);
+      const response = await fetch(`/api/timecard?userId=${session.user.id}&action=status`);
       const data = await response.json();
       
       if (data.isClocked && data.lastClockIn) {
@@ -125,8 +134,10 @@ export default function Home() {
   };
 
   const fetchShifts = async () => {
+    if (!session?.user?.id) return;
+
     try {
-      const response = await fetch(`/api/timecard?userId=${MOCK_USER_ID}&action=shifts`);
+      const response = await fetch(`/api/timecard?userId=${session.user.id}&action=shifts`);
       const data = await response.json();
       
       // Transform shifts data for display
@@ -152,8 +163,10 @@ export default function Home() {
   };
 
   const fetchProjects = async () => {
+    if (!session?.user?.id) return;
+
     try {
-      const response = await fetch(`/api/projects?userId=${MOCK_USER_ID}`);
+      const response = await fetch(`/api/projects?userId=${session.user.id}`);
       const data = await response.json();
       setProjects(data.projects);
     } catch (error) {
@@ -162,13 +175,15 @@ export default function Home() {
   };
 
   const createProject = async () => {
+    if (!session?.user?.id) return;
+
     try {
       await fetch('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...newProject,
-          userId: MOCK_USER_ID,
+          userId: session.user.id,
         }),
       });
       setNewProject({ name: '', link: '' });
@@ -211,6 +226,8 @@ export default function Home() {
   };
 
   const toggleClock = async () => {
+    if (!session?.user?.id) return;
+
     try {
       if (clockedIn) {
         // Clock out
@@ -219,7 +236,7 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'clockOut',
-            userId: MOCK_USER_ID,
+            userId: session.user.id,
             shiftId: currentShiftId,
             timestamp: new Date().toISOString(),
           }),
@@ -236,7 +253,7 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'clockIn',
-            userId: MOCK_USER_ID,
+            userId: session.user.id,
             timestamp: new Date().toISOString(),
           }),
         });
@@ -254,16 +271,43 @@ export default function Home() {
     }
   };
 
-  if (loading) {
+  // Don't render anything while checking authentication
+  if (status === "loading") {
     return <div className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#1e1b4b] text-[#f1f5f9] flex items-center justify-center">
       Loading...
     </div>;
   }
 
+  // Don't render the page content if not authenticated
+  if (!session) {
+    return null;
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#1e1b4b] text-[#f1f5f9] py-6">
       <header className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mb-8">
-        <h1 className="text-3xl tracking-tight font-instrument-serif bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">Timecard</h1>
+        <div className="flex justify-between items-center">
+          <h1 className="text-3xl tracking-tight font-instrument-serif bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">Timecard</h1>
+          
+          {session?.user && (
+            <div className="flex items-center space-x-4">
+              {session.user.image && (
+                <img 
+                  src={session.user.image} 
+                  alt={session.user.name || 'User'} 
+                  className="w-8 h-8 rounded-full border-2 border-[#64748b]/20"
+                />
+              )}
+              <span className="text-[#94a3b8]">{session.user.name}</span>
+              <button
+                onClick={() => signOut()}
+                className="text-sm text-[#94a3b8] hover:text-[#f1f5f9] transition-colors"
+              >
+                Sign out
+              </button>
+            </div>
+          )}
+        </div>
       </header>
       
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">

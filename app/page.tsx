@@ -48,10 +48,12 @@ export default function Home() {
   }, [status, router]);
 
   useEffect(() => {
-    checkClockStatus();
-    fetchShifts();
-    fetchProjects();
-  }, []);
+    if (session?.user?.id) {
+      checkClockStatus();
+      fetchShifts();
+      fetchProjects();
+    }
+  }, [session]);
 
   // Update clock and elapsed time
   useEffect(() => {
@@ -76,6 +78,12 @@ export default function Home() {
         setClockedIn(true);
         setCurrentShiftId(data.lastClockIn.shiftId);
         setClockInTime(new Date(data.lastClockIn.timestamp));
+      } else {
+        // Explicitly handle clocked out state
+        setClockedIn(false);
+        setCurrentShiftId(null);
+        setClockInTime(null);
+        setTimeElapsed(0);
       }
     } catch (error) {
       console.error('Error checking clock status:', error);
@@ -298,7 +306,7 @@ export default function Home() {
                   className="w-8 h-8 rounded-full border-2 border-[#64748b]/20"
                 />
               )}
-              <span className="text-[#94a3b8]">{session.user.name}</span>
+              <span className="text-[#94a3b8]" title={session.user.id}>{session.user.name}</span>
               <button
                 onClick={() => signOut()}
                 className="text-sm text-[#94a3b8] hover:text-[#f1f5f9] transition-colors"

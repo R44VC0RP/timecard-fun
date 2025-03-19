@@ -3,11 +3,11 @@ import { db } from '@/app/db';
 import { invoices, invoiceLineItems, projects, clockInRecords, clockOutRecords, projectRates, userConfig, invoiceSettings } from '@/app/db/schema';
 import { eq, and, between } from 'drizzle-orm';
 import { getServerSession } from 'next-auth';
-import { options } from '../auth/[...nextauth]/options';
+import { authOptions } from '../auth/[...nextauth]/options';
 
 export async function GET(request: NextRequest) {
   try {
-    const session = await getServerSession(options);
+    const session = await getServerSession(authOptions);
     if (!session?.user?.id) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -56,7 +56,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession(options);
+    const session = await getServerSession(authOptions);
     if (!session?.user?.id) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }

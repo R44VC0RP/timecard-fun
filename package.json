@@ -14,11 +14,16 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
+    "@types/uuid": "^10.0.0",
     "drizzle-orm": "^0.40.1",
+    "jspdf": "^3.0.1",
+    "jspdf-autotable": "^5.0.2",
     "next": "15.2.3",
+    "next-auth": "^4.24.11",
     "postgres": "^3.4.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "uuid": "^11.1.0",
     "ws": "^8.18.1"
   },
   "devDependencies": {

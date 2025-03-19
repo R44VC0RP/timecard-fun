@@ -1,16 +1,17 @@
 import type { Metadata } from "next";
 import { Instrument_Serif, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { Providers } from "./providers";
 
 const instrumentSerif = Instrument_Serif({
-  variable: "--font-instrument-serif",
   subsets: ["latin"],
-  weight: "400",
+  weight: ["400"],
+  variable: "--font-instrument-serif",
 });
 
 const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
   subsets: ["latin"],
+  variable: "--font-geist-mono",
 });
 
 export const metadata: Metadata = {
@@ -20,15 +21,13 @@ export const metadata: Metadata = {
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
     <html lang="en">
-      <body
-        className={`${instrumentSerif.variable} ${geistMono.variable} antialiased`}
-      >
-        {children}
+      <body className={`${instrumentSerif.variable} ${geistMono.variable} antialiased`}>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

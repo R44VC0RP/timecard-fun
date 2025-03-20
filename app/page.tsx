@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from 'next/link';
 import { Project } from "./db/schema";
 import { generateInvoicePDF } from './components/InvoicePDF';
+import useSWR from 'swr';
 
 type TimeEntry = {
   id: string;
@@ -50,6 +51,15 @@ type WeeklyInvoiceCard = {
   }[];
 };
 
+// Create a fetcher function for SWR
+const fetcher = (url: string) => fetch(url).then(res => res.json());
+
+// SWR configuration for better performance
+const swrConfig = {
+  revalidateOnFocus: false, // Don't revalidate when window regains focus
+  dedupingInterval: 5000,   // Dedupe similar requests within 5 seconds
+};
+
 export default function Home() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -74,6 +84,33 @@ export default function Home() {
   const [weeklyCards, setWeeklyCards] = useState<WeeklyInvoiceCard[]>([]);
   const [invoiceSettings, setInvoiceSettings] = useState<any>(null);
 
+  // SWR hooks for data fetching with caching and revalidation
+  const { data: clockStatusData, mutate: mutateClockStatus } = useSWR(
+    session?.user?.id ? `/api/timecard?userId=${session.user.id}&action=status` : null,
+    fetcher,
+    swrConfig
+  );
+  
+  const { data: shiftsData, mutate: mutateShifts } = useSWR(
+    session?.user?.id ? `/api/timecard?userId=${session.user.id}&action=shifts` : null,
+    fetcher,
+    swrConfig
+  );
+  
+  const { data: projectsData, mutate: mutateProjects } = useSWR(
+    session?.user?.id ? `/api/projects?userId=${session.user.id}` : null,
+    fetcher,
+    swrConfig
+  );
+  
+  const { data: invoicesData, mutate: mutateInvoices } = useSWR('/api/invoices', fetcher, swrConfig);
+  
+  const { data: userConfigData, mutate: mutateUserConfig } = useSWR('/api/user-config', fetcher, {
+    ...swrConfig,
+    revalidateOnFocus: false,
+    revalidateIfStale: false,  // Only fetch once since config rarely changes
+  });
+
   // Redirect if not authenticated
   useEffect(() => {
     if (status === "unauthenticated") {
@@ -81,16 +118,79 @@ export default function Home() {
     }
   }, [status, router]);
 
-  // Load initial data when session is available
+  // Process clock status data
   useEffect(() => {
-    if (session?.user?.id) {
-      checkClockStatus();
-      fetchShifts();
-      fetchProjects();
-      fetchInvoices();
-      fetchInvoiceSettings();
+    if (clockStatusData) {
+      if (clockStatusData.isClocked && clockStatusData.lastClockIn) {
+        setClockedIn(true);
+        setCurrentShiftId(clockStatusData.lastClockIn.shiftId);
+        setClockInTime(new Date(clockStatusData.lastClockIn.timestamp));
+      } else {
+        // Explicitly handle clocked out state
+        setClockedIn(false);
+        setCurrentShiftId(null);
+        setClockInTime(null);
+        setTimeElapsed(0);
+      }
+      setLoading(false);
     }
-  }, [session]);
+  }, [clockStatusData]);
+
+  // Process shifts data
+  useEffect(() => {
+    if (shiftsData?.shifts && projectsData?.projects) {
+      // Transform shifts data for display
+      const formattedEntries = shiftsData.shifts.map((shift: Shift) => {
+        const project = projectsData.projects.find((p: Project) => p.id === shift.projectId);
+        return {
+          id: shift.shiftId,
+          date: new Date(shift.clockIn).toLocaleDateString(),
+          timeIn: new Date(shift.clockIn).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timeOut: shift.clockOut ? new Date(shift.clockOut).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
+          hours: formatDuration(shift.duration),
+          projectId: shift.projectId,
+          projectName: project?.name,
+          projectLink: project?.link,
+          clockInTimestamp: new Date(shift.clockIn).getTime(),
+          isActive: !shift.clockOut && shift.shiftId === currentShiftId
+        };
+      });
+
+      // Sort entries: active clock-ins first, then by date (newest to oldest)
+      const sortedEntries = formattedEntries.sort((a: TimeEntry, b: TimeEntry) => {
+        // Active clock-ins always come first
+        if (a.isActive && !b.isActive) return -1;
+        if (!a.isActive && b.isActive) return 1;
+        // Then sort by timestamp (newest first)
+        return b.clockInTimestamp - a.clockInTimestamp;
+      });
+
+      setEntries(sortedEntries);
+      calculateTodayStats(shiftsData.shifts);
+      setLoading(false);
+    }
+  }, [shiftsData, projectsData, currentShiftId]);
+
+  // Process projects data
+  useEffect(() => {
+    if (projectsData?.projects) {
+      setProjects(projectsData.projects);
+    }
+  }, [projectsData]);
+
+  // Process invoices data
+  useEffect(() => {
+    if (invoicesData?.invoices) {
+      setInvoices(invoicesData.invoices || []);
+    }
+  }, [invoicesData]);
+
+  // Process user config data
+  useEffect(() => {
+    if (userConfigData?.invoiceSettings) {
+      setInvoiceSettings(userConfigData.invoiceSettings || { defaultHourlyRate: "0" });
+    }
+  }, [userConfigData]);
 
   // Update clock and elapsed time
   useEffect(() => {
@@ -103,31 +203,6 @@ export default function Home() {
     }, 1000);
     return () => clearInterval(timer);
   }, [clockedIn, clockInTime]);
-
-  const checkClockStatus = async () => {
-    if (!session?.user?.id) return;
-    
-    try {
-      const response = await fetch(`/api/timecard?userId=${session.user.id}&action=status`);
-      const data = await response.json();
-      
-      if (data.isClocked && data.lastClockIn) {
-        setClockedIn(true);
-        setCurrentShiftId(data.lastClockIn.shiftId);
-        setClockInTime(new Date(data.lastClockIn.timestamp));
-      } else {
-        // Explicitly handle clocked out state
-        setClockedIn(false);
-        setCurrentShiftId(null);
-        setClockInTime(null);
-        setTimeElapsed(0);
-      }
-    } catch (error) {
-      console.error('Error checking clock status:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const formatDuration = (seconds: number | null): string => {
     if (!seconds) return '-';
@@ -178,58 +253,6 @@ export default function Home() {
     });
   };
 
-  const fetchShifts = async () => {
-    if (!session?.user?.id) return;
-
-    try {
-      const response = await fetch(`/api/timecard?userId=${session.user.id}&action=shifts`);
-      const data = await response.json();
-      
-      // Transform shifts data for display
-      const formattedEntries = data.shifts.map((shift: Shift) => {
-        const project = projects.find(p => p.id === shift.projectId);
-        return {
-          id: shift.shiftId,
-          date: new Date(shift.clockIn).toLocaleDateString(),
-          timeIn: new Date(shift.clockIn).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          timeOut: shift.clockOut ? new Date(shift.clockOut).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
-          hours: formatDuration(shift.duration),
-          projectId: shift.projectId,
-          projectName: project?.name,
-          projectLink: project?.link,
-          clockInTimestamp: new Date(shift.clockIn).getTime(),
-          isActive: !shift.clockOut && shift.shiftId === currentShiftId
-        };
-      });
-
-      // Sort entries: active clock-ins first, then by date (newest to oldest)
-      const sortedEntries = formattedEntries.sort((a: TimeEntry, b: TimeEntry) => {
-        // Active clock-ins always come first
-        if (a.isActive && !b.isActive) return -1;
-        if (!a.isActive && b.isActive) return 1;
-        // Then sort by timestamp (newest first)
-        return b.clockInTimestamp - a.clockInTimestamp;
-      });
-
-      setEntries(sortedEntries);
-      calculateTodayStats(data.shifts);
-    } catch (error) {
-      console.error('Error fetching shifts:', error);
-    }
-  };
-
-  const fetchProjects = async () => {
-    if (!session?.user?.id) return;
-
-    try {
-      const response = await fetch(`/api/projects?userId=${session.user.id}`);
-      const data = await response.json();
-      setProjects(data.projects);
-    } catch (error) {
-      console.error('Error fetching projects:', error);
-    }
-  };
-
   const createProject = async () => {
     if (!session?.user?.id) return;
 
@@ -244,7 +267,8 @@ export default function Home() {
       });
       setNewProject({ name: '', link: '' });
       setShowProjectModal(false);
-      fetchProjects();
+      // Update SWR cache
+      mutateProjects();
     } catch (error) {
       console.error('Error creating project:', error);
     }
@@ -258,27 +282,11 @@ export default function Home() {
         body: JSON.stringify({ shiftId, projectId }),
       });
       setEditingShiftId(null);
-      fetchShifts();
+      // Update SWR cache
+      mutateShifts();
     } catch (error) {
       console.error('Error assigning project:', error);
     }
-  };
-
-  // Update stats every minute when clocked in
-  useEffect(() => {
-    if (clockedIn) {
-      const statsTimer = setInterval(() => {
-        fetchShifts();
-      }, 60000); // Update every minute
-      return () => clearInterval(statsTimer);
-    }
-  }, [clockedIn]);
-
-  const formatTime = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
   const toggleClock = async () => {
@@ -320,20 +328,11 @@ export default function Home() {
         setClockInTime(new Date());
       }
 
-      // Refresh shifts after clock in/out
-      fetchShifts();
+      // Update SWR caches
+      mutateClockStatus();
+      mutateShifts();
     } catch (error) {
       console.error('Error toggling clock:', error);
-    }
-  };
-
-  const fetchInvoices = async () => {
-    try {
-      const response = await fetch('/api/invoices');
-      const data = await response.json();
-      setInvoices(data.invoices || []);
-    } catch (error) {
-      console.error('Error fetching invoices:', error);
     }
   };
 
@@ -355,26 +354,26 @@ export default function Home() {
         endDate: end.toISOString()
       };
 
-      console.log('📅 Generating invoice with date range:', dateRange);
-
-      const response = await fetch('/api/invoices', {
+      // Generate the invoice
+      const invoiceResponse = await fetch('/api/invoices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(dateRange),
       });
 
-      if (!response.ok) {
-        const error = await response.json();
-        console.error('Error response:', error);
+      if (!invoiceResponse.ok) {
+        const error = await invoiceResponse.json();
         throw new Error(error.error || 'Failed to generate invoice');
       }
 
-      const data = await response.json();
-      if (data.invoice) {
-        console.log('✅ Invoice created successfully:', data.invoice.id);
-        
-        // Get user config for company details
+      const invoiceData = await invoiceResponse.json();
+      
+      if (invoiceData.invoice) {
+        // Get user config immediately after invoice generation
         const userConfigResponse = await fetch('/api/user-config');
+        const configData = await userConfigResponse.json();
+        
+        // Set company details
         let companyName = '';
         let companyEmail = '';
         let companyAddress = '';
@@ -383,62 +382,43 @@ export default function Home() {
         let notes = '';
         let currency = 'USD';
         
-        try {
-          const configData = await userConfigResponse.json();
-          
-          // Get business info from user config
-          if (configData.userConfig) {
-            companyName = configData.userConfig.businessName || '';
-            companyEmail = configData.userConfig.email || '';
-            companyAddress = [
-              configData.userConfig.address,
-              configData.userConfig.city && configData.userConfig.state ? 
-                `${configData.userConfig.city}, ${configData.userConfig.state} ${configData.userConfig.zipCode || ''}` : 
-                ''
-            ].filter(Boolean).join('\n');
-            companyPhone = configData.userConfig.phone || '';
-          }
-          
-          // Get invoice settings
-          if (configData.invoiceSettings) {
-            // Override with invoice settings if available
-            companyName = companyName || ''; // Keep the userConfig value
-            companyEmail = companyEmail || ''; // Keep the userConfig value
-            
-            // Add payment terms and other invoice-specific settings
-            paymentTerms = configData.invoiceSettings.paymentTerms || '';
-            notes = configData.invoiceSettings.defaultNotes || '';
-            currency = configData.invoiceSettings.currency || 'USD';
-            
-            console.log('💼 Using invoice settings:', {
-              paymentTerms,
-              currency
-            });
-          }
-          
-          console.log('🏢 Using company details for PDF');
-          
-          // Generate and download PDF immediately
-          const doc = generateInvoicePDF({
-            invoice: data.invoice,
-            companyName,
-            companyEmail,
-            companyAddress,
-            companyPhone,
-            paymentTerms,
-            notes,
-            currency
-          });
-
-          // Download PDF
-          doc.save(`invoice-${data.invoice.invoiceNumber}.pdf`);
-          console.log('📥 PDF downloaded');
-        } catch (e) {
-          console.error('Error fetching user config and invoice settings:', e);
+        // Get business info from user config
+        if (configData.userConfig) {
+          companyName = configData.userConfig.businessName || '';
+          companyEmail = configData.userConfig.email || '';
+          companyAddress = [
+            configData.userConfig.address,
+            configData.userConfig.city && configData.userConfig.state ? 
+              `${configData.userConfig.city}, ${configData.userConfig.state} ${configData.userConfig.zipCode || ''}` : 
+              ''
+          ].filter(Boolean).join('\n');
+          companyPhone = configData.userConfig.phone || '';
         }
         
-        // Update UI
-        fetchInvoices();
+        // Get invoice settings
+        if (configData.invoiceSettings) {
+          paymentTerms = configData.invoiceSettings.paymentTerms || '';
+          notes = configData.invoiceSettings.defaultNotes || '';
+          currency = configData.invoiceSettings.currency || 'USD';
+        }
+        
+        // Generate and download PDF immediately
+        const doc = generateInvoicePDF({
+          invoice: invoiceData.invoice,
+          companyName,
+          companyEmail,
+          companyAddress,
+          companyPhone,
+          paymentTerms,
+          notes,
+          currency
+        });
+
+        // Download PDF
+        doc.save(`invoice-${invoiceData.invoice.invoiceNumber}.pdf`);
+        
+        // Update SWR cache
+        mutateInvoices();
         setShowInvoiceModal(false);
       }
     } catch (error) {
@@ -457,16 +437,19 @@ export default function Home() {
     }).format(Number(amount));
   };
 
-  const fetchInvoiceSettings = async () => {
-    try {
-      const response = await fetch('/api/user-config');
-      const data = await response.json();
-      setInvoiceSettings(data.invoiceSettings || { defaultHourlyRate: "0" });
-    } catch (error) {
-      console.error('Error fetching invoice settings:', error);
-      setInvoiceSettings({ defaultHourlyRate: "0" });
-    }
+  const formatTime = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
+
+  // Generate weekly cards when entries or invoiceSettings change
+  useEffect(() => {
+    if (entries.length && invoiceSettings) {
+      generateWeeklyCards();
+    }
+  }, [entries, clockInTime, invoiceSettings]);
 
   const generateWeeklyCards = () => {
     if (!entries.length) return;
@@ -479,75 +462,79 @@ export default function Home() {
       ? Number(invoiceSettings.defaultHourlyRate) 
       : 0;
     
-    console.log('💰 Using hourly rate for weekly cards:', hourlyRate);
-    
-    entries.forEach(entry => {
-      const entryDate = new Date(entry.date);
-      const weekStart = new Date(entryDate);
-      weekStart.setDate(entryDate.getDate() - entryDate.getDay()); // Get Sunday
-      weekStart.setHours(0, 0, 0, 0);
-      
-      const weekEnd = new Date(weekStart);
-      weekEnd.setDate(weekStart.getDate() + 6);
-      weekEnd.setHours(23, 59, 59, 999);
-
-      const weekKey = weekStart.toISOString();
-
-      if (!weeklyShifts.has(weekKey)) {
-        weeklyShifts.set(weekKey, {
-          startDate: weekStart,
-          endDate: weekEnd,
-          totalHours: 0,
-          projectCount: 0,
-          totalAmount: 0,
-          projects: [],
-        });
-      }
-
-      const card = weeklyShifts.get(weekKey)!;
-      
-      // Parse hours from the duration string (e.g., "2h 30m" -> 2.5)
-      let hours = 0;
-      if (typeof entry.hours === 'string' && entry.hours !== '-') {
-        const match = entry.hours.match(/(\d+)h\s*(\d+)?m?/);
-        if (match) {
-          const [_, h, m] = match;
-          hours = parseInt(h) + (parseInt(m) || 0) / 60;
-        }
-      } else if (typeof entry.hours === 'number') {
-        hours = entry.hours;
-      }
-
-      // Add active shift duration if this is the current shift
-      if (entry.isActive && clockInTime) {
-        const activeHours = (new Date().getTime() - clockInTime.getTime()) / (1000 * 60 * 60);
-        hours += activeHours;
-      }
-      
-      if (!isNaN(hours) && hours > 0) {
-        card.totalHours += hours;
+    // Calculate weekly cards in a memoized way to avoid unnecessary recalculations
+    const processEntries = () => {
+      entries.forEach(entry => {
+        const entryDate = new Date(entry.date);
+        const weekStart = new Date(entryDate);
+        weekStart.setDate(entryDate.getDate() - entryDate.getDay()); // Get Sunday
+        weekStart.setHours(0, 0, 0, 0);
         
-        // Calculate amount using hourly rate from settings
-        const amount = hours * hourlyRate;
-        card.totalAmount += amount;
+        const weekEnd = new Date(weekStart);
+        weekEnd.setDate(weekStart.getDate() + 6);
+        weekEnd.setHours(23, 59, 59, 999);
 
-        // Update project information
-        if (entry.projectId) {
-          const projectIndex = card.projects.findIndex(p => p.name === entry.projectName);
-          if (projectIndex === -1) {
-            card.projects.push({
-              name: entry.projectName || 'Unnamed Project',
-              hours: hours,
-              amount: amount,
-            });
-            card.projectCount++;
-          } else {
-            card.projects[projectIndex].hours += hours;
-            card.projects[projectIndex].amount += amount;
+        const weekKey = weekStart.toISOString();
+
+        if (!weeklyShifts.has(weekKey)) {
+          weeklyShifts.set(weekKey, {
+            startDate: weekStart,
+            endDate: weekEnd,
+            totalHours: 0,
+            projectCount: 0,
+            totalAmount: 0,
+            projects: [],
+          });
+        }
+
+        const card = weeklyShifts.get(weekKey)!;
+        
+        // Parse hours from the duration string (e.g., "2h 30m" -> 2.5)
+        let hours = 0;
+        if (typeof entry.hours === 'string' && entry.hours !== '-') {
+          const match = entry.hours.match(/(\d+)h\s*(\d+)?m?/);
+          if (match) {
+            const [_, h, m] = match;
+            hours = parseInt(h) + (parseInt(m) || 0) / 60;
+          }
+        } else if (typeof entry.hours === 'number') {
+          hours = entry.hours;
+        }
+
+        // Add active shift duration if this is the current shift
+        if (entry.isActive && clockInTime) {
+          const activeHours = (new Date().getTime() - clockInTime.getTime()) / (1000 * 60 * 60);
+          hours += activeHours;
+        }
+        
+        if (!isNaN(hours) && hours > 0) {
+          card.totalHours += hours;
+          
+          // Calculate amount using hourly rate from settings
+          const amount = hours * hourlyRate;
+          card.totalAmount += amount;
+
+          // Update project information
+          if (entry.projectId) {
+            const projectIndex = card.projects.findIndex(p => p.name === entry.projectName);
+            if (projectIndex === -1) {
+              card.projects.push({
+                name: entry.projectName || 'Unnamed Project',
+                hours: hours,
+                amount: amount,
+              });
+              card.projectCount++;
+            } else {
+              card.projects[projectIndex].hours += hours;
+              card.projects[projectIndex].amount += amount;
+            }
           }
         }
-      }
-    });
+      });
+    };
+
+    // Process entries to create weekly cards
+    processEntries();
 
     // Convert to array and sort by date
     const cards = Array.from(weeklyShifts.values())
@@ -555,13 +542,6 @@ export default function Home() {
 
     setWeeklyCards(cards);
   };
-
-  // Generate weekly cards when entries or invoiceSettings change
-  useEffect(() => {
-    if (entries.length && invoiceSettings) {
-      generateWeeklyCards();
-    }
-  }, [entries, clockInTime, invoiceSettings]);
 
   const viewInvoice = async (startDate: Date, endDate: Date) => {
     try {
@@ -576,13 +556,17 @@ export default function Home() {
         return;
       }
 
-      // Fetch full invoice with line items
-      const response = await fetch(`/api/invoices?invoiceId=${matchingInvoice.id}`);
-      const data = await response.json();
+      // Fetch invoice details and user config in parallel
+      const [invoiceResponse, userConfigResponse] = await Promise.all([
+        fetch(`/api/invoices?invoiceId=${matchingInvoice.id}`),
+        fetch('/api/user-config')
+      ]);
       
-      if (data.invoice) {
-        // Get user config for company details
-        const userConfigResponse = await fetch('/api/user-config');
+      const invoiceData = await invoiceResponse.json();
+      const configData = await userConfigResponse.json();
+      
+      if (invoiceData.invoice) {
+        // Get business info from user config
         let companyName = '';
         let companyEmail = '';
         let companyAddress = '';
@@ -591,69 +575,68 @@ export default function Home() {
         let notes = '';
         let currency = 'USD';
         
-        try {
-          const configData = await userConfigResponse.json();
-          
-          // Get business info from user config
-          if (configData.userConfig) {
-            companyName = configData.userConfig.businessName || '';
-            companyEmail = configData.userConfig.email || '';
-            companyAddress = [
-              configData.userConfig.address,
-              configData.userConfig.city && configData.userConfig.state ? 
-                `${configData.userConfig.city}, ${configData.userConfig.state} ${configData.userConfig.zipCode || ''}` : 
-                ''
-            ].filter(Boolean).join('\n');
-            companyPhone = configData.userConfig.phone || '';
-          }
-          
-          // Get invoice settings
-          if (configData.invoiceSettings) {
-            // Override with invoice settings if available
-            companyName = companyName || ''; // Keep the userConfig value
-            companyEmail = companyEmail || ''; // Keep the userConfig value
-            
-            // Add payment terms and other invoice-specific settings
-            paymentTerms = configData.invoiceSettings.paymentTerms || '';
-            notes = configData.invoiceSettings.defaultNotes || '';
-            currency = configData.invoiceSettings.currency || 'USD';
-            
-            console.log('💼 Using invoice settings:', {
-              paymentTerms,
-              currency
-            });
-          }
-          
-          console.log('🏢 Using company details for PDF');
-          
-          // Generate PDF
-          const doc = generateInvoicePDF({
-            invoice: data.invoice,
-            companyName,
-            companyEmail,
-            companyAddress,
-            companyPhone,
-            paymentTerms,
-            notes,
-            currency
-          });
-
-          // Download PDF
-          doc.save(`invoice-${data.invoice.invoiceNumber}.pdf`);
-          console.log('📥 PDF downloaded');
-        } catch (e) {
-          console.error('Error fetching user config and invoice settings:', e);
+        // Get business info from user config
+        if (configData.userConfig) {
+          companyName = configData.userConfig.businessName || '';
+          companyEmail = configData.userConfig.email || '';
+          companyAddress = [
+            configData.userConfig.address,
+            configData.userConfig.city && configData.userConfig.state ? 
+              `${configData.userConfig.city}, ${configData.userConfig.state} ${configData.userConfig.zipCode || ''}` : 
+              ''
+          ].filter(Boolean).join('\n');
+          companyPhone = configData.userConfig.phone || '';
         }
+        
+        // Get invoice settings
+        if (configData.invoiceSettings) {
+          // Add payment terms and other invoice-specific settings
+          paymentTerms = configData.invoiceSettings.paymentTerms || '';
+          notes = configData.invoiceSettings.defaultNotes || '';
+          currency = configData.invoiceSettings.currency || 'USD';
+        }
+        
+        // Generate PDF
+        const doc = generateInvoicePDF({
+          invoice: invoiceData.invoice,
+          companyName,
+          companyEmail,
+          companyAddress,
+          companyPhone,
+          paymentTerms,
+          notes,
+          currency
+        });
+
+        // Download PDF
+        doc.save(`invoice-${invoiceData.invoice.invoiceNumber}.pdf`);
       }
     } catch (error) {
       console.error('Error viewing invoice:', error);
     }
   };
 
+  // Update stats every minute when clocked in
+  useEffect(() => {
+    if (clockedIn) {
+      const statsTimer = setInterval(() => {
+        // Only refetch shifts data while clocked in
+        mutateShifts();
+      }, 60000); // Update every minute
+      return () => clearInterval(statsTimer);
+    }
+  }, [clockedIn, mutateShifts]);
+
   // Don't render anything while checking authentication
   if (status === "loading") {
     return <div className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#1e1b4b] text-[#f1f5f9] flex items-center justify-center">
-      Loading...
+      <div className="animate-pulse flex flex-col items-center">
+        <div className="flex items-center space-x-3 mb-4">
+          <img src="/logo.png" alt="NextTime Logo" className="w-8 h-8" />
+          <div className="h-8 w-28 bg-[#334155] rounded-md"></div>
+        </div>
+        <div className="h-4 w-48 bg-[#334155] rounded"></div>
+      </div>
     </div>;
   }
 
@@ -662,11 +645,60 @@ export default function Home() {
     return null;
   }
 
+  // Render loading skeleton if data is still loading
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#1e1b4b] text-[#f1f5f9] py-6">
+        <header className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mb-8">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center space-x-3">
+              <img src="/logo.png" alt="NextTime Logo" className="w-8 h-8" />
+              <h1 className="text-3xl tracking-tight font-instrument-serif bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">NextTime</h1>
+            </div>
+            
+            {session?.user && (
+              <div className="flex items-center space-x-4">
+                {session.user.image && (
+                  <img 
+                    src={session.user.image} 
+                    alt={session.user.name || 'User'} 
+                    className="w-8 h-8 rounded-full border-2 border-[#64748b]/20"
+                  />
+                )}
+                <div className="text-[#94a3b8] flex items-center space-x-2 group">
+                  <span>{session.user.name}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </header>
+        
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="bg-[#1e293b]/70 backdrop-blur-md rounded-xl border border-[#64748b]/20 p-6 shadow-xl shadow-[#6366f1]/5 h-96 animate-pulse">
+                <div className="h-6 bg-[#334155] rounded w-1/3 mb-8"></div>
+                <div className="space-y-4">
+                  <div className="h-4 bg-[#334155] rounded w-full"></div>
+                  <div className="h-4 bg-[#334155] rounded w-5/6"></div>
+                  <div className="h-4 bg-[#334155] rounded w-4/6"></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#1e1b4b] text-[#f1f5f9] py-6">
       <header className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mb-8">
         <div className="flex justify-between items-center">
-          <h1 className="text-3xl tracking-tight font-instrument-serif bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">Timecard</h1>
+          <div className="flex items-center space-x-3">
+            <img src="/logo.png" alt="NextTime Logo" className="w-8 h-8" />
+            <h1 className="text-3xl tracking-tight font-instrument-serif bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">NextTime</h1>
+          </div>
           
           {session?.user && (
             <div className="flex items-center space-x-4">
@@ -703,7 +735,12 @@ export default function Home() {
           {/* Left Column - Clock In/Out */}
           <div className="bg-[#1e293b]/70 backdrop-blur-md rounded-xl border border-[#64748b]/20 p-6 shadow-xl shadow-[#6366f1]/5 transition-all duration-300 hover:shadow-[#6366f1]/10">
             <div className="flex flex-col items-center mb-8">
-              <h2 className="text-2xl font-instrument-serif font-light text-[#f1f5f9] mb-6">Time Tracker</h2>
+              <h2 className="text-2xl font-instrument-serif font-light text-[#f1f5f9] mb-6">
+                <span className="flex items-center">
+                  <img src="/logo.png" alt="NextTime Logo" className="w-6 h-6 mr-2" />
+                  Time Tracker
+                </span>
+              </h2>
               
               <div className="text-5xl font-geist-mono mb-7 text-[#f1f5f9] drop-shadow-md animate-[pulse_4s_ease-in-out_infinite]">
                 {time.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}
@@ -940,7 +977,10 @@ export default function Home() {
       {showProjectModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 animate-fadeIn">
           <div className="bg-[#1e293b] p-6 rounded-xl w-full max-w-md mx-4 shadow-2xl shadow-black/20 animate-slideUp">
-            <h3 className="text-xl font-instrument-serif mb-6 text-[#f1f5f9]">New Project</h3>
+            <div className="flex items-center space-x-2 mb-6">
+              <img src="/logo.png" alt="NextTime Logo" className="w-5 h-5" />
+              <h3 className="text-xl font-instrument-serif text-[#f1f5f9]">New Project</h3>
+            </div>
             <div className="space-y-4">
               <div>
                 <label htmlFor="projectName" className="block text-sm text-[#94a3b8] mb-1">Project Name</label>
@@ -987,7 +1027,10 @@ export default function Home() {
       {showInvoiceModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 animate-fadeIn">
           <div className="bg-[#1e293b] p-6 rounded-xl w-full max-w-md mx-4 shadow-2xl shadow-black/20 animate-slideUp">
-            <h3 className="text-xl font-instrument-serif mb-6 text-[#f1f5f9]">Generate Custom Invoice</h3>
+            <div className="flex items-center space-x-2 mb-6">
+              <img src="/logo.png" alt="NextTime Logo" className="w-5 h-5" />
+              <h3 className="text-xl font-instrument-serif text-[#f1f5f9]">Generate Custom Invoice</h3>
+            </div>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-[#94a3b8] mb-1">Start Date</label>

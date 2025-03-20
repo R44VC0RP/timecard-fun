@@ -6,9 +6,12 @@ export default function SignIn() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#1e1b4b] text-[#f1f5f9] flex items-center justify-center">
       <div className="bg-[#1e293b]/70 backdrop-blur-md rounded-xl border border-[#64748b]/20 p-8 shadow-xl shadow-[#6366f1]/5 max-w-md w-full mx-4">
-        <h1 className="text-3xl font-instrument-serif text-center mb-8 bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">
-          Sign in to Timecard
-        </h1>
+        <div className="flex flex-col items-center mb-8">
+          <img src="/logo.png" alt="NextTime Logo" className="w-16 h-16 mb-4" />
+          <h1 className="text-3xl font-instrument-serif text-center bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">
+            Sign in to NextTime
+          </h1>
+        </div>
         
         <button
           onClick={() => signIn("github", { callbackUrl: "/" })}

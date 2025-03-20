@@ -60,7 +60,13 @@ export default function SettingsPage() {
 
   if (status === "loading" || loading) {
     return <div className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#1e1b4b] text-[#f1f5f9] flex items-center justify-center">
-      Loading...
+      <div className="animate-pulse flex flex-col items-center">
+        <div className="flex items-center space-x-3 mb-4">
+          <img src="/logo.png" alt="NextTime Logo" className="w-8 h-8" />
+          <div className="h-8 w-28 bg-[#334155] rounded-md"></div>
+        </div>
+        <div className="h-4 w-48 bg-[#334155] rounded"></div>
+      </div>
     </div>;
   }
 
@@ -72,7 +78,10 @@ export default function SettingsPage() {
     <div className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#1e1b4b] text-[#f1f5f9] py-6">
       <header className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mb-8">
         <div className="flex justify-between items-center">
-          <h1 className="text-3xl tracking-tight font-instrument-serif bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">Settings</h1>
+          <div className="flex items-center space-x-3">
+            <img src="/logo.png" alt="NextTime Logo" className="w-8 h-8" />
+            <h1 className="text-3xl tracking-tight font-instrument-serif bg-clip-text text-transparent bg-gradient-to-r from-[#f9a8d4] to-[#93c5fd]">NextTime Settings</h1>
+          </div>
           
           {session?.user && (
             <div className="flex items-center space-x-4">
@@ -107,7 +116,10 @@ export default function SettingsPage() {
         <form onSubmit={handleSubmit} className="space-y-8">
           {/* Business Information */}
           <div className="bg-[#1e293b]/70 backdrop-blur-md rounded-xl border border-[#64748b]/20 p-6">
-            <h2 className="text-xl font-instrument-serif mb-6">Business Information</h2>
+            <div className="flex items-center space-x-2 mb-6">
+              <img src="/logo.png" alt="NextTime Logo" className="w-5 h-5" />
+              <h2 className="text-xl font-instrument-serif">Business Information</h2>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm text-[#94a3b8] mb-2">Business Name</label>
@@ -222,7 +234,10 @@ export default function SettingsPage() {
 
           {/* Invoice Settings */}
           <div className="bg-[#1e293b]/70 backdrop-blur-md rounded-xl border border-[#64748b]/20 p-6">
-            <h2 className="text-xl font-instrument-serif mb-6">Invoice Settings</h2>
+            <div className="flex items-center space-x-2 mb-6">
+              <img src="/logo.png" alt="NextTime Logo" className="w-5 h-5" />
+              <h2 className="text-xl font-instrument-serif">Invoice Settings</h2>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm text-[#94a3b8] mb-2">Default Hourly Rate</label>

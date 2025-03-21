@@ -111,4 +111,44 @@ export async function GET(request: NextRequest) {
     console.error('Error in timecard API:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const shiftId = searchParams.get('shiftId');
+    const userId = searchParams.get('userId');
+
+    if (!shiftId || !userId) {
+      return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
+    }
+
+    // Verify the user is operating on their own data
+    if (userId !== session.user.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Delete clock in and clock out records for the shift
+    await db.delete(clockInRecords)
+      .where(and(
+        eq(clockInRecords.shiftId, shiftId),
+        eq(clockInRecords.userId, userId)
+      ));
+
+    await db.delete(clockOutRecords)
+      .where(and(
+        eq(clockOutRecords.shiftId, shiftId),
+        eq(clockOutRecords.userId, userId)
+      ));
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting shift:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
 } 

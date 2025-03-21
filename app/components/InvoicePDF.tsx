@@ -23,9 +23,10 @@ export const generateInvoicePDF = ({
   notes = '',
   currency = 'USD',
 }: InvoicePDFProps) => {
-  console.log('🎨 Starting PDF generation for invoice:', invoice.invoiceNumber);
-  
   const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.width;
+  const margin = 20;
+  const lineSpacing = 5;
   
   try {
     // Set document properties
@@ -33,159 +34,161 @@ export const generateInvoicePDF = ({
       title: `Invoice ${invoice.invoiceNumber}`,
       subject: 'Invoice',
       author: companyName,
-      keywords: 'invoice, nexttime',
+      keywords: 'invoice, billing',
       creator: 'NextTime App'
     });
-    console.log('📄 Set PDF document properties');
 
-    // Add company logo/header
-    doc.setFontSize(24);
-    doc.setTextColor(44, 62, 80);
-    doc.setFont('helvetica', 'bold');
-    doc.text(companyName, 20, 20);
-    console.log('🏢 Added company header');
-
-    // Add company info
-    doc.setFontSize(10);
-    doc.setTextColor(100);
-    doc.setFont('helvetica', 'normal');
-    doc.text(companyAddress, 20, 30);
-    doc.text(companyEmail, 20, 35);
-    doc.text(companyPhone, 20, 40);
-    console.log('📞 Added company contact info');
-
-    // Add invoice details with styling
-    doc.setFontSize(12);
-    doc.setTextColor(44, 62, 80);
-    doc.setFont('helvetica', 'bold');
-    
-    // Create a styled box for invoice details
-    doc.setFillColor(247, 250, 252);
-    doc.rect(130, 15, 65, 35, 'F');
-    doc.setTextColor(44, 62, 80);
-    doc.text(`Invoice #: ${invoice.invoiceNumber}`, 135, 25);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Date: ${new Date(invoice.createdAt).toLocaleDateString()}`, 135, 32);
-    doc.text(`Due: ${new Date(invoice.dueDate).toLocaleDateString()}`, 135, 39);
-    console.log('📅 Added invoice details');
-
-    // Add billing period with styling
-    doc.setFontSize(11);
-    doc.setFont('helvetica', 'bold');
-    doc.text('Billing Period:', 20, 60);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`${new Date(invoice.startDate).toLocaleDateString()} - ${new Date(invoice.endDate).toLocaleDateString()}`, 70, 60);
-    console.log('📊 Added billing period');
-
-    // Format currency based on settings
     const formatCurrency = (amount: string | number | null | undefined) => {
       const numAmount = Number(amount || 0);
       return currency === 'USD'
         ? `$${numAmount.toFixed(2)}`
         : `${numAmount.toFixed(2)} ${currency}`;
     };
-    
-    // Add line items table with enhanced styling
-    console.log('📝 Preparing line items table...');
-    const tableData = invoice.lineItems.map(item => [
-      item.description,
-      item.quantity,
-      formatCurrency(item.rate),
-      formatCurrency(item.amount)
-    ]);
 
+    let yPos = margin;
+
+    // Add "INVOICE" header and number
+    doc.setFontSize(16);
+    doc.setTextColor(33, 33, 33);
+    doc.setFont('helvetica', 'normal');
+    doc.text('INVOICE', margin, yPos);
+    doc.text(invoice.invoiceNumber, pageWidth - margin, yPos, { align: 'right' });
+
+    // Add billing period in gray
+    yPos += 8;
+    doc.setFontSize(9);
+    doc.setTextColor(88, 88, 88);
+    const startDate = new Date(invoice.startDate).toLocaleDateString();
+    const endDate = new Date(invoice.endDate).toLocaleDateString();
+    doc.text(`Billing Period: ${startDate} - ${endDate}`, pageWidth - margin, yPos, { align: 'right' });
+
+    // Add From section
+    yPos += 25;
+    doc.setFontSize(9);
+    doc.setTextColor(88, 88, 88);
+    doc.text('From:', margin, yPos);
+    
+    yPos += lineSpacing;
+    doc.setTextColor(33, 33, 33);
+    doc.text(companyName, margin, yPos);
+    
+    // Handle address lines more compactly
+    const addressLines = companyAddress.split('\\n');
+    addressLines.forEach((line) => {
+      yPos += 4; // Reduced spacing between address lines
+      doc.text(line, margin, yPos);
+    });
+    
+    yPos += 8; // Reduced spacing before email
+    doc.text(companyEmail, margin, yPos);
+
+    // Add Bill To section with adjusted starting position
+    const billToX = pageWidth / 2;
+    const billToY = yPos - ((addressLines.length * 4) + 8); // Adjust based on new compact spacing
+    doc.setTextColor(88, 88, 88);
+    doc.text('Bill To:', billToX, billToY);
+    
+    doc.setTextColor(33, 33, 33);
+    doc.text(companyName, billToX, billToY + 4);
+    doc.text(companyEmail, billToX, billToY + 8);
+
+    // Add line items table with minimal styling
+    yPos += 20; // Adjusted spacing before table
     autoTable(doc, {
-      head: [['Description', 'Hours', 'Rate', 'Amount']],
-      body: tableData,
-      startY: 70,
-      theme: 'striped',
+      startY: yPos,
+      head: [['Date', 'Description', 'Hours', 'Rate', 'Amount']],
+      body: invoice.lineItems.map(item => [
+        new Date(item.createdAt).toLocaleDateString(),
+        item.description,
+        item.quantity,
+        formatCurrency(item.rate),
+        formatCurrency(item.amount)
+      ]),
+      theme: 'plain',
       headStyles: {
-        fillColor: [44, 62, 80],
-        textColor: 255,
-        fontSize: 10,
-        fontStyle: 'bold',
-        halign: 'left',
+        fillColor: false,
+        textColor: 88,
+        fontSize: 9,
+        fontStyle: 'normal',
+        cellPadding: { top: 5, right: 4, bottom: 5, left: 4 },
       },
       bodyStyles: {
-        fontSize: 10,
-        lineColor: [238, 242, 246],
+        fontSize: 9,
+        textColor: 33,
+        cellPadding: { top: 4, right: 4, bottom: 4, left: 4 },
       },
       columnStyles: {
-        0: { cellWidth: 90 },
-        1: { cellWidth: 30, halign: 'right' },
-        2: { cellWidth: 30, halign: 'right' },
+        0: { cellWidth: 30 },
+        1: { cellWidth: 'auto' },
+        2: { cellWidth: 25, halign: 'right' },
         3: { cellWidth: 30, halign: 'right' },
+        4: { cellWidth: 30, halign: 'right' },
       },
       alternateRowStyles: {
-        fillColor: [247, 250, 252],
+        fillColor: false,
+      },
+      margin: { left: margin, right: margin },
+      didDrawCell: (data) => {
+        if (data.row.index === 0 && data.section === 'head') {
+          doc.setDrawColor(220, 220, 220);
+          doc.setLineWidth(0.1);
+          doc.line(
+            data.settings.margin.left,
+            data.cell.y + data.cell.height,
+            pageWidth - data.settings.margin.right,
+            data.cell.y + data.cell.height
+          );
+        }
       },
     });
-    console.log('📊 Added line items table');
 
-    // Add totals with enhanced styling
-    const finalY = (doc as any).lastAutoTable.finalY || 70;
-    
-    // Add a subtle line above totals
-    doc.setDrawColor(238, 242, 246);
-    doc.setLineWidth(0.5);
-    doc.line(130, finalY + 15, 190, finalY + 15);
+    // Get the final Y position after the table
+    const finalY = (doc as any).lastAutoTable.finalY + 15;
 
-    doc.setFontSize(10);
-    doc.setTextColor(100);
-    doc.text('Subtotal:', 140, finalY + 20);
-    doc.setTextColor(44, 62, 80);
-    doc.text(formatCurrency(invoice.subtotal), 170, finalY + 20, { align: 'right' });
+    // Add totals section with minimal styling
+    const totalsX = pageWidth - margin - 80;
+    let summaryY = finalY;
 
+    // Add total hours
+    const totalHours = invoice.lineItems.reduce((sum, item) => sum + Number(item.quantity), 0);
+    doc.setFontSize(9);
+    doc.text('Total Hours:', totalsX, summaryY);
+    doc.text(totalHours.toString(), pageWidth - margin, summaryY, { align: 'right' });
+
+    // Add subtotal
+    summaryY += lineSpacing + 2;
+    doc.text('Subtotal:', totalsX, summaryY);
+    doc.text(formatCurrency(invoice.subtotal), pageWidth - margin, summaryY, { align: 'right' });
+
+    // Add tax if applicable
     if (invoice.taxRate) {
-      doc.setTextColor(100);
-      doc.text(`Tax (${Number(invoice.taxRate)}%)`, 140, finalY + 27);
-      doc.setTextColor(44, 62, 80);
-      doc.text(formatCurrency(invoice.taxAmount), 170, finalY + 27, { align: 'right' });
+      summaryY += lineSpacing + 2;
+      doc.text(`Tax (${invoice.taxRate}%)`, totalsX, summaryY);
+      doc.text(formatCurrency(invoice.taxAmount), pageWidth - margin, summaryY, { align: 'right' });
     }
 
-    // Add total with background highlight
-    doc.setFillColor(247, 250, 252);
-    doc.rect(135, finalY + 32, 55, 10, 'F');
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(44, 62, 80);
-    doc.text('Total:', 140, finalY + 39);
-    doc.text(formatCurrency(invoice.total), 170, finalY + 39, { align: 'right' });
-    console.log('💰 Added totals section');
-
-    // Add payment instructions with styling
+    // Add total due
+    summaryY += lineSpacing + 4;
     doc.setFontSize(10);
-    doc.setFont('helvetica', 'bold');
-    doc.text('Payment Instructions:', 20, finalY + 50);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(100);
-    
-    // Add payment terms if available
+    doc.text('Total Due:', totalsX, summaryY);
+    doc.text(formatCurrency(invoice.total), pageWidth - margin, summaryY, { align: 'right' });
+
+    // Add payment terms if provided
     if (paymentTerms) {
-      doc.text(paymentTerms, 20, finalY + 57);
-    } else {
-      doc.text('Please include the invoice number with your payment.', 20, finalY + 57);
+      summaryY += 20;
+      doc.setFontSize(9);
+      doc.setTextColor(88, 88, 88);
+      doc.text('Payment Terms:', margin, summaryY);
+      doc.setTextColor(33, 33, 33);
+      doc.text(paymentTerms, margin + 50, summaryY);
     }
-    
-    // Add notes if available
-    if (notes) {
-      doc.text('Notes:', 20, finalY + 65);
-      doc.text(notes, 20, finalY + 72, { maxWidth: 170 });
-    }
-    
-    console.log('💳 Added payment instructions');
 
-    // Add footer with styling
+    // Add minimal footer
     const pageHeight = doc.internal.pageSize.height;
-    doc.setFillColor(247, 250, 252);
-    doc.rect(0, pageHeight - 25, doc.internal.pageSize.width, 25, 'F');
     doc.setFontSize(8);
-    doc.setTextColor(100);
-    doc.text('Thank you for your business!', 20, pageHeight - 15);
-    doc.text(`Generated by NextTime | ${new Date().toLocaleString()}`, doc.internal.pageSize.width - 20, pageHeight - 15, { align: 'right' });
-    console.log('✨ Added footer');
+    doc.setTextColor(150, 150, 150);
+    doc.text(`${invoice.invoiceNumber}`, margin, pageHeight - 15);
 
-    console.log('✅ PDF generation completed successfully!');
     return doc;
   } catch (error) {
     console.error('❌ Error generating PDF:', error);

@@ -51,6 +51,8 @@ type WeeklyInvoiceCard = {
   }[];
 };
 
+type InvoicePeriod = 'weekly' | 'biweekly' | 'monthly';
+
 // Create a fetcher function for SWR
 const fetcher = (url: string) => fetch(url).then(res => res.json());
 
@@ -83,6 +85,15 @@ export default function Home() {
   });
   const [weeklyCards, setWeeklyCards] = useState<WeeklyInvoiceCard[]>([]);
   const [invoiceSettings, setInvoiceSettings] = useState<any>(null);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingEntry, setEditingEntry] = useState<{
+    id: string;
+    clockInDate: string;
+    clockInTime: string;
+    clockOutDate: string;
+    clockOutTime: string;
+  } | null>(null);
+  const [invoicePeriod, setInvoicePeriod] = useState<InvoicePeriod>('biweekly');
 
   // SWR hooks for data fetching with caching and revalidation
   const { data: clockStatusData, mutate: mutateClockStatus } = useSWR(
@@ -336,29 +347,43 @@ export default function Home() {
     }
   };
 
-  const generateInvoice = async () => {
+  const generateInvoice = async (startDateStr?: string, endDateStr?: string) => {
     try {
-      // Ensure we have a valid date range
-      const start = selectedDateRange.startDate 
-        ? new Date(selectedDateRange.startDate)
-        : new Date();
-      const end = selectedDateRange.endDate 
-        ? new Date(selectedDateRange.endDate)
-        : new Date();
-
-      // Set end date to end of day
-      end.setHours(23, 59, 59, 999);
+      // Get date strings either from parameters or from state
+      const startString = startDateStr || selectedDateRange.startDate;
+      const endString = endDateStr || selectedDateRange.endDate;
       
-      const dateRange = {
-        startDate: start.toISOString(),
-        endDate: end.toISOString()
-      };
+      // Validate that we have both dates before proceeding
+      if (!startString || !endString) {
+        console.error('Invalid date range:', { startString, endString });
+        return;
+      }
+
+      // Create proper Date objects and ensure valid dates
+      const start = new Date(startString);
+      const end = new Date(endString);
+
+      // Validate the dates are valid
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        console.error('Invalid date objects:', { start, end });
+        return;
+      }
+
+      // Set end date to end of day to include all entries
+      end.setHours(23, 59, 59, 999);
+
+      console.log('Generating invoice with dates:', { start, end, period: invoicePeriod });
 
       // Generate the invoice
       const invoiceResponse = await fetch('/api/invoices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(dateRange),
+        body: JSON.stringify({
+          startDate: start.toISOString(),
+          endDate: end.toISOString(),
+          period: invoicePeriod,
+          dateGenerated: new Date().toISOString()
+        }),
       });
 
       if (!invoiceResponse.ok) {
@@ -401,10 +426,17 @@ export default function Home() {
           notes = configData.invoiceSettings.defaultNotes || '';
           currency = configData.invoiceSettings.currency || 'USD';
         }
+
+        // Add period type to invoice metadata
+        const invoiceMetadata = {
+          ...invoiceData.invoice,
+          periodType: invoicePeriod,
+          periodLabel: getPeriodLabel(start, invoicePeriod)
+        };
         
         // Generate and download PDF immediately
         const doc = generateInvoicePDF({
-          invoice: invoiceData.invoice,
+          invoice: invoiceMetadata,
           companyName,
           companyEmail,
           companyAddress,
@@ -415,7 +447,7 @@ export default function Home() {
         });
 
         // Download PDF
-        doc.save(`invoice-${invoiceData.invoice.invoiceNumber}.pdf`);
+        doc.save(`invoice-${invoiceData.invoice.invoiceNumber}-${invoicePeriod}.pdf`);
         
         // Update SWR cache
         mutateInvoices();
@@ -423,6 +455,21 @@ export default function Home() {
       }
     } catch (error) {
       console.error('Error generating invoice:', error);
+    }
+  };
+
+  // Helper function to get period label
+  const getPeriodLabel = (startDate: Date, period: InvoicePeriod): string => {
+    switch (period) {
+      case 'weekly':
+        return `Week of ${startDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
+      case 'biweekly':
+        return `Biweekly Period: ${startDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })} - ${
+          new Date(startDate.getTime() + 13 * 24 * 60 * 60 * 1000).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
+      case 'monthly':
+        return `${startDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`;
+      default:
+        return '';
     }
   };
 
@@ -449,95 +496,154 @@ export default function Home() {
     if (entries.length && invoiceSettings) {
       generateWeeklyCards();
     }
-  }, [entries, clockInTime, invoiceSettings]);
+  }, [entries, clockInTime, invoiceSettings, invoicePeriod]);
 
   const generateWeeklyCards = () => {
     if (!entries.length) return;
 
-    // Group shifts by week
-    const weeklyShifts = new Map<string, WeeklyInvoiceCard>();
-    
-    // Get hourly rate from settings
+    const periodShifts = new Map<string, WeeklyInvoiceCard>();
     const hourlyRate = invoiceSettings?.defaultHourlyRate 
       ? Number(invoiceSettings.defaultHourlyRate) 
       : 0;
-    
-    // Calculate weekly cards in a memoized way to avoid unnecessary recalculations
-    const processEntries = () => {
-      entries.forEach(entry => {
-        const entryDate = new Date(entry.date);
-        const weekStart = new Date(entryDate);
-        weekStart.setDate(entryDate.getDate() - entryDate.getDay()); // Get Sunday
-        weekStart.setHours(0, 0, 0, 0);
-        
-        const weekEnd = new Date(weekStart);
-        weekEnd.setDate(weekStart.getDate() + 6);
-        weekEnd.setHours(23, 59, 59, 999);
 
-        const weekKey = weekStart.toISOString();
-
-        if (!weeklyShifts.has(weekKey)) {
-          weeklyShifts.set(weekKey, {
-            startDate: weekStart,
-            endDate: weekEnd,
-            totalHours: 0,
-            projectCount: 0,
-            totalAmount: 0,
-            projects: [],
-          });
+    const getPeriodKey = (date: Date) => {
+      const periodStart = new Date(date);
+      periodStart.setHours(0, 0, 0, 0);
+      
+      switch (invoicePeriod) {
+        case 'weekly': {
+          // Start from Sunday of the current week
+          const day = periodStart.getDay();
+          periodStart.setDate(periodStart.getDate() - day);
+          break;
         }
-
-        const card = weeklyShifts.get(weekKey)!;
-        
-        // Parse hours from the duration string (e.g., "2h 30m" -> 2.5)
-        let hours = 0;
-        if (typeof entry.hours === 'string' && entry.hours !== '-') {
-          const match = entry.hours.match(/(\d+)h\s*(\d+)?m?/);
-          if (match) {
-            const [_, h, m] = match;
-            hours = parseInt(h) + (parseInt(m) || 0) / 60;
-          }
-        } else if (typeof entry.hours === 'number') {
-          hours = entry.hours;
-        }
-
-        // Add active shift duration if this is the current shift
-        if (entry.isActive && clockInTime) {
-          const activeHours = (new Date().getTime() - clockInTime.getTime()) / (1000 * 60 * 60);
-          hours += activeHours;
-        }
-        
-        if (!isNaN(hours) && hours > 0) {
-          card.totalHours += hours;
+        case 'biweekly': {
+          // Get the first day of the month
+          const firstDay = new Date(periodStart.getFullYear(), periodStart.getMonth(), 1);
+          // Find first Sunday
+          const firstSunday = new Date(firstDay);
+          firstSunday.setDate(firstDay.getDate() + (7 - firstDay.getDay()) % 7);
           
-          // Calculate amount using hourly rate from settings
-          const amount = hours * hourlyRate;
-          card.totalAmount += amount;
-
-          // Update project information
-          if (entry.projectId) {
-            const projectIndex = card.projects.findIndex(p => p.name === entry.projectName);
-            if (projectIndex === -1) {
-              card.projects.push({
-                name: entry.projectName || 'Unnamed Project',
-                hours: hours,
-                amount: amount,
-              });
-              card.projectCount++;
+          // If date is before first Sunday, use last month's third Sunday
+          if (date < firstSunday) {
+            const lastMonth = new Date(date.getFullYear(), date.getMonth() - 1, 1);
+            const firstSundayLastMonth = new Date(lastMonth);
+            firstSundayLastMonth.setDate(lastMonth.getDate() + (7 - lastMonth.getDay()) % 7);
+            periodStart.setTime(firstSundayLastMonth.getTime());
+            periodStart.setDate(firstSundayLastMonth.getDate() + 14); // Third Sunday
+          } else {
+            // If date is between 1st and 2nd Sunday, use first Sunday
+            // If date is between 3rd and 4th Sunday, use third Sunday
+            const daysSinceFirstSunday = Math.floor((date.getTime() - firstSunday.getTime()) / (24 * 60 * 60 * 1000));
+            if (daysSinceFirstSunday < 14) {
+              periodStart.setTime(firstSunday.getTime());
             } else {
-              card.projects[projectIndex].hours += hours;
-              card.projects[projectIndex].amount += amount;
+              periodStart.setTime(firstSunday.getTime());
+              periodStart.setDate(firstSunday.getDate() + 14);
             }
           }
+          break;
         }
-      });
+        case 'monthly': {
+          // Start from first day of current month
+          periodStart.setDate(1);
+          break;
+        }
+      }
+      
+      return periodStart.toISOString();
     };
 
-    // Process entries to create weekly cards
-    processEntries();
+    const getPeriodEnd = (startDate: Date) => {
+      const endDate = new Date(startDate);
+      
+      switch (invoicePeriod) {
+        case 'weekly': {
+          // End on Saturday
+          endDate.setDate(startDate.getDate() + 6);
+          break;
+        }
+        case 'biweekly': {
+          // End after 13 days (covering full 2 weeks)
+          endDate.setDate(startDate.getDate() + 13);
+          break;
+        }
+        case 'monthly': {
+          // End on last day of month
+          endDate.setMonth(endDate.getMonth() + 1);
+          endDate.setDate(0);
+          break;
+        }
+      }
+      
+      endDate.setHours(23, 59, 59, 999);
+      return endDate;
+    };
 
-    // Convert to array and sort by date
-    const cards = Array.from(weeklyShifts.values())
+    // Process each entry and group by period
+    entries.forEach(entry => {
+      const entryDate = new Date(entry.date);
+      const periodKey = getPeriodKey(entryDate);
+      const periodStart = new Date(periodKey);
+      const periodEnd = getPeriodEnd(periodStart);
+
+      // Skip entries that don't belong in the period
+      if (entryDate < periodStart || entryDate > periodEnd) {
+        return;
+      }
+
+      if (!periodShifts.has(periodKey)) {
+        periodShifts.set(periodKey, {
+          startDate: periodStart,
+          endDate: periodEnd,
+          totalHours: 0,
+          projectCount: 0,
+          totalAmount: 0,
+          projects: [],
+        });
+      }
+
+      const card = periodShifts.get(periodKey)!;
+      
+      let hours = 0;
+      if (typeof entry.hours === 'string' && entry.hours !== '-') {
+        const match = entry.hours.match(/(\d+)h\s*(\d+)?m?/);
+        if (match) {
+          const [_, h, m] = match;
+          hours = parseInt(h) + (parseInt(m) || 0) / 60;
+        }
+      } else if (typeof entry.hours === 'number') {
+        hours = entry.hours;
+      }
+
+      if (entry.isActive && clockInTime) {
+        const activeHours = (new Date().getTime() - clockInTime.getTime()) / (1000 * 60 * 60);
+        hours += activeHours;
+      }
+      
+      if (!isNaN(hours) && hours > 0) {
+        card.totalHours += hours;
+        const amount = hours * hourlyRate;
+        card.totalAmount += amount;
+
+        if (entry.projectId) {
+          const projectIndex = card.projects.findIndex(p => p.name === entry.projectName);
+          if (projectIndex === -1) {
+            card.projects.push({
+              name: entry.projectName || 'Unnamed Project',
+              hours: hours,
+              amount: amount,
+            });
+            card.projectCount++;
+          } else {
+            card.projects[projectIndex].hours += hours;
+            card.projects[projectIndex].amount += amount;
+          }
+        }
+      }
+    });
+
+    const cards = Array.from(periodShifts.values())
       .sort((a, b) => b.startDate.getTime() - a.startDate.getTime());
 
     setWeeklyCards(cards);
@@ -626,6 +732,132 @@ export default function Home() {
       return () => clearInterval(statsTimer);
     }
   }, [clockedIn, mutateShifts]);
+
+  // Add function to delete a shift
+  const deleteShift = async (shiftId: string) => {
+    if (!session?.user?.id) return;
+    
+    // Confirm before deleting
+    if (!confirm("Are you sure you want to delete this time entry? This action cannot be undone.")) {
+      return;
+    }
+    
+    try {
+      const response = await fetch(`/api/timecard?shiftId=${shiftId}&userId=${session.user.id}`, {
+        method: 'DELETE',
+      });
+      
+      if (response.ok) {
+        // Refresh the shifts data
+        mutateShifts();
+        
+        // Show success message
+        alert("Time entry deleted successfully");
+      } else {
+        console.error('Failed to delete time entry');
+      }
+    } catch (error) {
+      console.error('Error deleting time entry:', error);
+    }
+  };
+
+  // Add function to open edit modal for a shift
+  const openEditModal = (entry: TimeEntry) => {
+    const clockInDate = new Date(entry.clockInTimestamp);
+    const clockInDateString = clockInDate.toISOString().split('T')[0];
+    const clockInTimeString = clockInDate.toTimeString().split(' ')[0].substring(0, 5);
+    
+    let clockOutDate = new Date();
+    let clockOutTimeString = '';
+    
+    // If there's a clock out time, parse it
+    if (entry.timeOut !== '-') {
+      // Create a date from the entry date and timeOut
+      const [hours, minutes] = entry.timeOut.split(':');
+      clockOutDate = new Date(entry.clockInTimestamp);
+      clockOutDate.setHours(parseInt(hours), parseInt(minutes));
+      
+      // If clock out time is earlier than clock in time, it's the next day
+      if (clockOutDate.getTime() < clockInDate.getTime()) {
+        clockOutDate.setDate(clockOutDate.getDate() + 1);
+      }
+      
+      clockOutTimeString = clockOutDate.toTimeString().split(' ')[0].substring(0, 5);
+    }
+    
+    setEditingEntry({
+      id: entry.id,
+      clockInDate: clockInDateString,
+      clockInTime: clockInTimeString,
+      clockOutDate: clockOutDate.toISOString().split('T')[0],
+      clockOutTime: clockOutTimeString
+    });
+    
+    setShowEditModal(true);
+  };
+
+  // Add function to save edited shift
+  const saveEditedShift = async () => {
+    if (!session?.user?.id || !editingEntry) return;
+    
+    try {
+      // Format dates for API
+      const clockInDateTime = new Date(`${editingEntry.clockInDate}T${editingEntry.clockInTime}`);
+      let clockOutDateTime = null;
+      
+      if (editingEntry.clockOutTime) {
+        clockOutDateTime = new Date(`${editingEntry.clockOutDate}T${editingEntry.clockOutTime}`);
+      }
+      
+      // Validate that clock in is before clock out
+      if (clockOutDateTime && clockInDateTime >= clockOutDateTime) {
+        alert('Clock in time must be before clock out time');
+        return;
+      }
+      
+      const response = await fetch('/api/timecard/edit', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId: session.user.id,
+          shiftId: editingEntry.id,
+          clockInTime: clockInDateTime.toISOString(),
+          clockOutTime: clockOutDateTime?.toISOString()
+        }),
+      });
+      
+      if (response.ok) {
+        // Refresh the shifts data
+        mutateShifts();
+        setShowEditModal(false);
+        setEditingEntry(null);
+        
+        // Show success message
+        alert("Time entry updated successfully");
+      } else {
+        console.error('Failed to update time entry');
+      }
+    } catch (error) {
+      console.error('Error updating time entry:', error);
+    }
+  };
+
+  const handleGenerateInvoice = (card: WeeklyInvoiceCard) => {
+    // Get date strings directly from the card
+    const startDate = card.startDate.toISOString().split('T')[0];
+    const endDate = card.endDate.toISOString().split('T')[0];
+    
+    // Update state for consistency (though we won't rely on it)
+    setSelectedDateRange({
+      startDate: startDate,
+      endDate: endDate
+    });
+
+    // Call generate invoice with explicit dates rather than relying on state
+    generateInvoice(startDate, endDate);
+  };
 
   // Don't render anything while checking authentication
   if (status === "loading") {
@@ -788,7 +1020,31 @@ export default function Home() {
                 <div key={entry.id} className="border-b border-[#64748b]/20 pb-5 last:border-0 hover:bg-[#334155]/30 transition-all duration-300 rounded-lg p-4">
                   <div className="flex justify-between items-center mb-3">
                     <span className="text-sm font-geist-mono text-[#94a3b8]">{entry.date}</span>
-                    <span className="text-sm font-geist-mono text-[#5eead4]">{entry.hours}</span>
+                    <div className="flex items-center space-x-2">
+                      <span className="text-sm font-geist-mono text-[#5eead4]">{entry.hours}</span>
+                      {!entry.isActive && (
+                        <div className="flex space-x-2">
+                          <button 
+                            onClick={() => openEditModal(entry)}
+                            className="p-1.5 rounded-md text-[#a5b4fc] hover:bg-[#312e81]/30 transition-all duration-300"
+                            aria-label="Edit time entry"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                              <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                            </svg>
+                          </button>
+                          <button 
+                            onClick={() => deleteShift(entry.id)}
+                            className="p-1.5 rounded-md text-[#fda4af] hover:bg-[#9f1239]/30 transition-all duration-300"
+                            aria-label="Delete time entry"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                            </svg>
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <div className="flex flex-col space-y-3">
                     <div className="flex items-center space-x-3">
@@ -885,86 +1141,100 @@ export default function Home() {
           </div>
           
           {/* Right Column - Invoice Management */}
-          <div className="bg-[#1e293b]/70 backdrop-blur-md rounded-xl border border-[#64748b]/20 p-6 shadow-xl shadow-[#6366f1]/5 transition-all duration-300 hover:shadow-[#6366f1]/10">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-instrument-serif font-light text-[#f1f5f9]">Invoices</h2>
+          <div className="bg-[#1e293b]/70 backdrop-blur-md rounded-xl border border-[#64748b]/20 p-6 shadow-xl shadow-[#6366f1]/5">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-3">
+                <h2 className="text-xl font-light text-[#f1f5f9]">Invoices</h2>
+                <div className="flex bg-[#0f172a]/50 rounded-lg p-0.5">
+                  <button
+                    onClick={() => setInvoicePeriod('weekly')}
+                    className={`px-3 py-1 text-xs font-medium rounded-md transition-all duration-300 ${
+                      invoicePeriod === 'weekly'
+                        ? 'bg-[#3b82f6] text-white'
+                        : 'text-[#94a3b8] hover:text-[#f1f5f9]'
+                    }`}
+                  >
+                    Weekly
+                  </button>
+                  <button
+                    onClick={() => setInvoicePeriod('biweekly')}
+                    className={`px-3 py-1 text-xs font-medium rounded-md transition-all duration-300 ${
+                      invoicePeriod === 'biweekly'
+                        ? 'bg-[#3b82f6] text-white'
+                        : 'text-[#94a3b8] hover:text-[#f1f5f9]'
+                    }`}
+                  >
+                    Biweekly
+                  </button>
+                  <button
+                    onClick={() => setInvoicePeriod('monthly')}
+                    className={`px-3 py-1 text-xs font-medium rounded-md transition-all duration-300 ${
+                      invoicePeriod === 'monthly'
+                        ? 'bg-[#3b82f6] text-white'
+                        : 'text-[#94a3b8] hover:text-[#f1f5f9]'
+                    }`}
+                  >
+                    Monthly
+                  </button>
+                </div>
+              </div>
               <button
                 onClick={() => setShowInvoiceModal(true)}
-                className="px-4 py-2 bg-gradient-to-r from-[#3b82f6] to-[#60a5fa] text-white rounded-md hover:from-[#2563eb] hover:to-[#3b82f6] transition-all duration-300 transform hover:scale-[1.02] hover:shadow-lg hover:shadow-[#3b82f6]/20 flex items-center space-x-2"
+                className="flex items-center justify-center w-8 h-8 rounded-lg bg-[#3b82f6] text-white hover:bg-[#2563eb] transition-all duration-300"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                   <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
                 </svg>
-                <span>New Invoice</span>
               </button>
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-3">
               {weeklyCards.map((card, index) => (
-                <div key={index} className="border border-[#64748b]/20 rounded-lg p-4 hover:bg-[#334155]/40 transition-all duration-300 transform hover:scale-[1.01]">
-                  <div className="flex justify-between items-start mb-3">
+                <div key={index} className="border border-[#64748b]/20 rounded-lg p-4 hover:bg-[#1e293b] transition-all duration-300">
+                  <div className="flex justify-between items-start mb-2">
                     <div>
-                      <h3 className="font-instrument-serif text-[#f1f5f9] text-lg">
-                        Week of {card.startDate.toLocaleDateString()}
+                      <h3 className="text-[#f1f5f9] font-medium">
+                        Week of {card.startDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })}
                       </h3>
-                      <p className="text-sm text-[#94a3b8]">
-                        {card.startDate.toLocaleDateString()} - {card.endDate.toLocaleDateString()}
+                      <p className="text-xs text-[#94a3b8] mt-0.5">
+                        {card.startDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })} - {card.endDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })}
                       </p>
                     </div>
                     <div className="text-right">
-                      <p className="text-lg font-geist-mono text-[#f1f5f9]">{formatCurrency(card.totalAmount)}</p>
-                      <div className="flex items-center space-x-2 text-sm text-[#94a3b8]">
-                        <span>{Number(card.totalHours).toFixed(2)} hours</span>
+                      <p className="text-[#f1f5f9] font-medium">{formatCurrency(card.totalAmount)}</p>
+                      <div className="flex items-center gap-2 text-xs text-[#94a3b8] mt-0.5">
+                        <span>{card.totalHours.toFixed(2)} hours</span>
                         <span>•</span>
-                        <span>{card.projectCount} projects</span>
+                        <span>{card.projectCount} {card.projectCount === 1 ? 'project' : 'projects'}</span>
                       </div>
                     </div>
                   </div>
 
-                  {/* Project Summary */}
+                  {/* Project List */}
                   <div className="mt-3 space-y-2">
                     {card.projects.map((project, pIndex) => (
-                      <div key={pIndex} className="flex justify-between items-center text-sm px-2 py-1 rounded bg-[#1e293b]/50">
-                        <span className="text-[#94a3b8]">{project.name}</span>
-                        <div className="flex items-center space-x-3">
-                          <span className="text-[#5eead4]">{project.hours.toFixed(1)}h</span>
-                          <span className="text-[#94a3b8]">{formatCurrency(project.amount)}</span>
+                      <div key={pIndex} className="flex justify-between items-center text-sm">
+                        <span className="text-[#94a3b8] text-xs">{project.name}</span>
+                        <div className="flex items-center gap-4">
+                          <span className="text-[#5eead4] text-xs">{project.hours.toFixed(1)}h</span>
+                          <span className="text-[#94a3b8] text-xs">{formatCurrency(project.amount)}</span>
                         </div>
                       </div>
                     ))}
                   </div>
 
-                  <div className="flex space-x-2 mt-4">
-                    <button 
-                      onClick={() => {
-                        setSelectedDateRange({
-                          startDate: card.startDate.toISOString().split('T')[0],
-                          endDate: card.endDate.toISOString().split('T')[0]
-                        });
-                        generateInvoice();
-                      }}
-                      className="flex-1 py-2 px-3 bg-[#475569]/70 hover:bg-[#64748b]/70 rounded-md text-sm font-medium text-[#f1f5f9] transition-all duration-300 hover:shadow-lg hover:shadow-[#6366f1]/10"
-                    >
-                      Generate Invoice
-                    </button>
-                    {invoices.some(inv => 
-                      new Date(inv.startDate).getTime() === card.startDate.getTime() &&
-                      new Date(inv.endDate).getTime() === card.endDate.getTime()
-                    ) && (
-                      <button 
-                        onClick={() => viewInvoice(card.startDate, card.endDate)}
-                        className="flex-1 py-2 px-3 bg-gradient-to-r from-[#155e75]/30 to-[#0e7490]/30 hover:from-[#155e75]/40 hover:to-[#0e7490]/40 rounded-md text-sm font-medium text-[#7dd3fc] transition-all duration-300 hover:shadow-lg hover:shadow-[#38bdf8]/10"
-                      >
-                        View Invoice
-                      </button>
-                    )}
-                  </div>
+                  <button 
+                    onClick={() => handleGenerateInvoice(card)}
+                    className="w-full mt-4 py-2 text-sm text-center text-[#94a3b8] bg-[#0f172a]/50 hover:bg-[#0f172a] rounded-md transition-all duration-300"
+                  >
+                    Generate Invoice
+                  </button>
                 </div>
               ))}
 
               {weeklyCards.length === 0 && (
                 <div className="text-center py-8">
-                  <p className="text-[#94a3b8]">No time entries found</p>
+                  <p className="text-[#94a3b8] text-sm">No time entries found</p>
                 </div>
               )}
             </div>
@@ -1073,11 +1343,86 @@ export default function Home() {
                 Cancel
               </button>
               <button
-                onClick={generateInvoice}
+                onClick={() => {
+                  if (selectedDateRange.startDate && selectedDateRange.endDate) {
+                    generateInvoice();
+                  }
+                }}
                 disabled={!selectedDateRange.startDate || !selectedDateRange.endDate}
                 className="px-4 py-2 bg-gradient-to-r from-[#3b82f6] to-[#60a5fa] text-white rounded-md hover:from-[#2563eb] hover:to-[#3b82f6] disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 transform hover:scale-[1.02] hover:shadow-lg hover:shadow-[#3b82f6]/20"
               >
                 Generate Invoice
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Edit Time Entry Modal */}
+      {showEditModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1e293b] border border-[#64748b]/30 rounded-xl p-6 w-full max-w-md shadow-2xl">
+            <h2 className="text-xl font-instrument-serif text-[#f1f5f9] mb-6">Edit Time Entry</h2>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-[#94a3b8] mb-1">Clock In Date</label>
+                <input
+                  type="date"
+                  value={editingEntry?.clockInDate || ''}
+                  onChange={(e) => setEditingEntry(prev => prev ? {...prev, clockInDate: e.target.value} : null)}
+                  className="w-full bg-[#334155] border border-[#475569] rounded-md px-3 py-2 text-[#f1f5f9] focus:outline-none focus:ring-2 focus:ring-[#6366f1]"
+                  required
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm text-[#94a3b8] mb-1">Clock In Time</label>
+                <input
+                  type="time"
+                  value={editingEntry?.clockInTime || ''}
+                  onChange={(e) => setEditingEntry(prev => prev ? {...prev, clockInTime: e.target.value} : null)}
+                  className="w-full bg-[#334155] border border-[#475569] rounded-md px-3 py-2 text-[#f1f5f9] focus:outline-none focus:ring-2 focus:ring-[#6366f1]"
+                  required
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm text-[#94a3b8] mb-1">Clock Out Date</label>
+                <input
+                  type="date"
+                  value={editingEntry?.clockOutDate || ''}
+                  onChange={(e) => setEditingEntry(prev => prev ? {...prev, clockOutDate: e.target.value} : null)}
+                  className="w-full bg-[#334155] border border-[#475569] rounded-md px-3 py-2 text-[#f1f5f9] focus:outline-none focus:ring-2 focus:ring-[#6366f1]"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm text-[#94a3b8] mb-1">Clock Out Time</label>
+                <input
+                  type="time"
+                  value={editingEntry?.clockOutTime || ''}
+                  onChange={(e) => setEditingEntry(prev => prev ? {...prev, clockOutTime: e.target.value} : null)}
+                  className="w-full bg-[#334155] border border-[#475569] rounded-md px-3 py-2 text-[#f1f5f9] focus:outline-none focus:ring-2 focus:ring-[#6366f1]"
+                />
+              </div>
+            </div>
+            
+            <div className="flex space-x-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowEditModal(false);
+                  setEditingEntry(null);
+                }}
+                className="flex-1 py-2 px-4 bg-[#475569] hover:bg-[#64748b] rounded-md text-sm font-medium text-[#f1f5f9] transition-all duration-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEditedShift}
+                className="flex-1 py-2 px-4 bg-gradient-to-r from-[#4f46e5] to-[#6366f1] hover:from-[#4338ca] hover:to-[#4f46e5] rounded-md text-sm font-medium text-white transition-all duration-300"
+              >
+                Save Changes
               </button>
             </div>
           </div>
